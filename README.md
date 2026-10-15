@@ -232,6 +232,8 @@ Type `h` in the monitor to see this list on the ESP32 itself.
 
 ## Working on this together
 
+- **Quick push from a terminal** (Windows PowerShell):
+  `git add -A; git commit -m "Runs 10/15"; git pull --rebase; git push`
 - **Before a session:** in Source Control, click *Sync* or **Pull** to get the latest code.
 - **After a session:** commit your new `logs/` files with a short message
   (e.g. `Runs 10/15 – slider areas A–F`) and **Push**, so everyone has the data.

@@ -1,0 +1,16 @@
+{
+  // Terminal > Run Task... > "Analyze latest run"  (or Terminal > Run Build Task, Ctrl+Shift+B)
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Analyze latest run",
+      "type": "process",
+      "command": "python",
+      "args": ["${workspaceFolder}/tools/analyze_run.py"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    }
+  ]
+}

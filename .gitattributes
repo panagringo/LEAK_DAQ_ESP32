@@ -1,0 +1,4 @@
+# Keep line endings consistent across Windows and Mac teammates
+* text=auto
+*.bat text eol=crlf
+*.png binary

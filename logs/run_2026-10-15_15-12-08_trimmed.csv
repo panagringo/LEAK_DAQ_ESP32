@@ -1,0 +1,2 @@
+plateau,state,area_labels,t_start_s,t_end_s,seconds_used,rows,A_mean_inH2O,A_sd_inH2O,B_mean_inH2O,B_sd_inH2O,C_mean_inH2O,C_sd_inH2O,box_mean_inH2O,B_minus_C_inH2O,box_mean_Pa,A_avg_5s,P_room_Pa,T_room_C,T_box_C,Vs_V
+1,OFF,ASTOP,0.100,35.100,35.5,71,-0.0002,0.0008,0.0073,0.0069,0.0193,0.0083,0.0133,-0.0120,3.31,-0.0002,102001.37,25.762,24.375,5.1538

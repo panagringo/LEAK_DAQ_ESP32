@@ -117,7 +117,7 @@ STEP 4 - ANALYZE THE RUN
   This finds the steady periods by itself, so it still works if you forgot to label.
   It creates next to the log:
      run_..._trimmed.csv   one row per steady period: averages + standard deviations
-     run_..._trimmed.png   plot; green shading = the data that was kept
+     run_..._trimmed.png   plot + table: each section shaded and labeled, trimmed averages underneath
 
   Message "skipped ... too short" = you didn't hold that position long enough.
   Message "No steady plateaus found" = in a terminal in this folder, try:

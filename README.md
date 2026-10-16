@@ -142,7 +142,7 @@ Pick one of these:
 
 - **Double-click `tools/analyze_latest.bat`**. It analyzes the newest run, prints a table and opens the plot.
 - **VS Code:** PlatformIO sidebar (alien-head icon) → *PROJECT TASKS → Custom → Analyze latest run*,
-  or *Terminal → Run Build Task* (`Ctrl+Shift+B`).
+  or *Terminal → Run Build Task* (`Ctrl+Shift+B`), which also opens the plot.
 - **Terminal:**
   ```bash
   python tools/analyze_run.py                       # newest run
@@ -153,7 +153,7 @@ Pick one of these:
 The script finds the steady periods on its own, so it still works if you forgot to label areas. It writes these files next to the log:
 
 - `run_..._trimmed.csv`: one row per steady period, with means and standard deviations
-- `run_..._trimmed.png`: a plot of the run, with green shading on the data that was kept
+- `run_..._trimmed.png`: the run plotted with each steady section shaded and labeled (Zero, Area A, …), plus a table underneath of each section's trimmed averages (mean ± SD)
 
 | Message | Meaning |
 |---|---|

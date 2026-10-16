@@ -215,7 +215,23 @@ def print_table(results, rows, units):
             print("        " + "   ".join(extras))
 
 
-def plot(series, plateaus, results, units, path, title):
+ON_COLOR, OFF_COLOR = "#2ca02c", "#9aa0a6"   # shading for kept rows: system on / system off (zero)
+
+
+def section_name(r):
+    if r["state"] == "OFF":
+        return "Zero (system off)"
+    labels = r["area_labels"].split()
+    return "Area " + " / ".join(labels) if labels else "Unlabeled"
+
+
+def tint(color, alpha):
+    # a solid colour that looks like `color` at `alpha` over white (table cells can't do alpha)
+    from matplotlib.colors import to_rgb
+    return tuple(1 - alpha * (1 - c) for c in to_rgb(color))
+
+
+def plot(series, plateaus, results, rows, units, path, title, trim_s):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -223,25 +239,106 @@ def plot(series, plateaus, results, units, path, title):
     except ImportError:
         return False
     t, A, B, C, _ = series
-    fig, ax = plt.subplots(figsize=(12, 5))
+    nan = lambda v: [x if x is not None else float("nan") for x in v]   # noqa: E731
+    d = decimals(v for r in rows for k, v in r.items() if k and k.startswith(("A_", "B_", "C_"))) + 1
+    to_pa = PA_PER_UNIT.get(units, 1.0)
+
+    # figure: header text, graph, results table (table grows with the number of sections)
+    table_h = 0.42 * (len(results) + 1)
+    fig = plt.figure(figsize=(13, 5.2 + table_h + 1.7))
+    gs = fig.add_gridspec(2, 1, height_ratios=[5.2, table_h], hspace=0.32,
+                          left=0.065, right=0.935, top=1 - 1.4 / fig.get_figheight(),
+                          bottom=0.55 / fig.get_figheight())
+
+    # header
+    when = ""
+    if rows[0].get("time"):
+        when = "%s  to  %s" % (rows[0]["time"][:19], rows[-1]["time"][11:19])
+    env = []
+    for col, fmt_s in (("P_room_Pa", "room %.0f Pa"), ("T_room_C", "room %.1f \u00b0C"), ("T_box_C", "box %.1f \u00b0C"),
+                       ("Vs_V", "supply %.2f V")):
+        m = mean(num(r.get(col)) for r in rows) if col in rows[0] else None
+        if m is not None:
+            env.append(fmt_s % m)
+    fig.text(0.065, 1 - 0.32 / fig.get_figheight(), "Leak Rig Run  \u2014  " + title.replace(".csv", ""),
+             fontsize=15, fontweight="bold", color="#1f2933", va="top")
+    fig.text(0.065, 1 - 0.68 / fig.get_figheight(),
+             "   \u00b7   ".join(x for x in (when, "%.0f s, %d rows" % (t[-1], len(rows)), "units: " + units,
+                                            "   ".join(env)) if x),
+             fontsize=9.5, color="#52606d", va="top")
+
+    # graph
+    ax = fig.add_subplot(gs[0])
     ax2 = ax.twinx()
-    ax2.plot(t, [x if x is not None else float("nan") for x in A], color="0.7", lw=1, label="A pitot (right axis)")
-    ax.plot(t, [x if x is not None else float("nan") for x in B], color="tab:blue", lw=1.5, label="B box1")
-    ax.plot(t, [x if x is not None else float("nan") for x in C], color="tab:orange", lw=1.5, label="C box2")
+    ax2.plot(t, nan(A), color="0.6", lw=1, label="A  pitot \u2212 room  (right axis)")
+    ax.plot(t, nan(B), color="tab:blue", lw=1.6, label="B  box 1 \u2212 room")
+    ax.plot(t, nan(C), color="tab:orange", lw=1.6, label="C  box 2 \u2212 room")
+    ax.set_zorder(ax2.get_zorder() + 1)   # box traces on top of the pitot trace
+    ax.patch.set_visible(False)
     for (lo, hi), r in zip(plateaus, results):
-        ax.axvspan(t[lo], t[hi - 1], color="tab:green" if r["state"] == "ON" else "0.85", alpha=0.18)
-        ax.text((t[lo] + t[hi - 1]) / 2, 1.01, "%d%s" % (r["plateau"], " " + r["area_labels"] if r["area_labels"] else ""),
-                transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=9)
-    ax.set_xlabel("time (s)")
-    ax.set_ylabel("box - room (%s)" % units)
-    ax2.set_ylabel("pitot - room (%s)" % units)
+        on = r["state"] == "ON"
+        ax.axvspan(t[lo], t[hi - 1], color=ON_COLOR if on else OFF_COLOR, alpha=0.16 if on else 0.18, lw=0)
+        ax.text((t[lo] + t[hi - 1]) / 2, 1.015, "#%d\n%s" % (r["plateau"], section_name(r) if on else "Zero"),
+                transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=8.5,
+                fontweight="bold", color="#1e6b1e" if on else "#5f6368", linespacing=1.1)
+    ax.set_xlim(t[0], t[-1])
+    ax.set_xlabel("Time since start of run (s)", fontsize=10)
+    ax.set_ylabel("Box \u2212 room  (%s)" % units, fontsize=10)
+    ax2.set_ylabel("Pitot \u2212 room  (%s)" % units, fontsize=10, color="0.4")
+    ax2.tick_params(axis="y", colors="0.4")
     ax.grid(alpha=0.3)
+    for a in (ax, ax2):
+        a.spines["top"].set_visible(False)
+    from matplotlib.patches import Patch
     h1, l1 = ax.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
-    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=9)
-    ax.set_title(title + "   (shaded = rows kept)", fontsize=10, pad=18)
-    fig.tight_layout()
-    fig.savefig(path, dpi=120)
+    extra = [Patch(color=ON_COLOR, alpha=0.3, label="Kept rows (steady, trimmed)"),
+             Patch(color=OFF_COLOR, alpha=0.35, label="Kept rows, system off (zero check)")]
+    ax.legend(h1 + h2 + extra, l1 + l2 + [p.get_label() for p in extra], loc="upper left", fontsize=8.5,
+              framealpha=0.92, edgecolor="#d0d5dc")
+
+    # results table
+    tax = fig.add_subplot(gs[1])
+    tax.axis("off")
+    cols = ["#", "Section", "Time window (s)", "Used",
+            "A  Pitot (%s)" % units, "B  Box 1 (%s)" % units, "C  Box 2 (%s)" % units,
+            "Box avg (%s)" % units, "Box avg (Pa)"]
+    pm = lambda m, s: "\u2014" if m is None else "%s \u00b1 %s" % (fmt(m, d), fmt(s, d) if s is not None else "\u2014")   # noqa: E731
+    cells = [["%d" % r["plateau"], section_name(r), "%.1f \u2013 %.1f" % (r["t_start_s"], r["t_end_s"]),
+              "%.0f s" % r["seconds_used"],
+              pm(r["A_mean"], r["A_sd"]), pm(r["B_mean"], r["B_sd"]), pm(r["C_mean"], r["C_sd"]),
+              fmt(r["box_mean"], d), fmt(r["box_mean_Pa"], 1)] for r in results]
+    tab = tax.table(cellText=cells, colLabels=cols, cellLoc="center", bbox=[0, 0, 1, 1],
+                    colWidths=[0.04, 0.15, 0.11, 0.06, 0.14, 0.14, 0.14, 0.12, 0.10])
+    tab.auto_set_font_size(False)
+    tab.set_fontsize(9.5)
+    for (i, j), cell in tab.get_celld().items():
+        cell.set_edgecolor("#d0d5dc")
+        cell.set_linewidth(0.6)
+        if i == 0:
+            cell.set_facecolor("#2b3a4a")
+            cell.get_text().set_color("white")
+            cell.get_text().set_fontweight("bold")
+            continue
+        r = results[i - 1]
+        on = r["state"] == "ON"
+        cell.set_facecolor("#f5f7fa" if i % 2 == 0 else "white")
+        if j == 0:
+            cell.set_facecolor(tint(ON_COLOR if on else OFF_COLOR, 0.35))
+            cell.get_text().set_fontweight("bold")
+        if j == 1:
+            cell.get_text().set_fontweight("bold")
+            cell.get_text().set_ha("left")
+            cell.PAD = 0.04
+        if j in (7, 8):
+            cell.get_text().set_fontweight("bold")
+    tax.set_title("Trimmed averages by section   (mean \u00b1 standard deviation of the kept rows only)",
+                  fontsize=11, fontweight="bold", color="#1f2933", loc="left", pad=8)
+    fig.text(0.065, 0.2 / fig.get_figheight(),
+             "Settling periods are detected automatically and excluded; each section is trimmed %.1f s at both "
+             "ends.  Box avg = mean of B and C.  1 %s = %.2f Pa." % (trim_s, units, to_pa),
+             fontsize=8.5, color="#52606d", va="bottom")
+    fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
     return True
 
@@ -253,6 +350,7 @@ def main():
     ap.add_argument("--trim", type=float, default=1.0, help="extra seconds cut off each end of a plateau (default 1)")
     ap.add_argument("--min", type=float, default=3.0, help="shortest plateau kept after trimming, seconds (default 3)")
     ap.add_argument("--window", type=float, default=3.0, help="seconds compared before/after each row (default 3)")
+    ap.add_argument("--open", action="store_true", help="open the plot when done")
     args = ap.parse_args()
 
     path = args.csv or newest_log(project)
@@ -271,8 +369,10 @@ def main():
     base = path[:-4]
     write_csv(results, rows, units, base + "_trimmed.csv")
     print("\nSaved %s" % (base + "_trimmed.csv"))
-    if plot(series, plateaus, results, units, base + "_trimmed.png", os.path.basename(path)):
+    if plot(series, plateaus, results, rows, units, base + "_trimmed.png", os.path.basename(path), args.trim):
         print("Saved %s" % (base + "_trimmed.png"))
+        if args.open and hasattr(os, "startfile"):
+            os.startfile(base + "_trimmed.png")
 
 
 if __name__ == "__main__":

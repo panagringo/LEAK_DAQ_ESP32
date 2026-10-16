@@ -1,0 +1,2 @@
+plateau,state,area_labels,time_start,time_end,t_start_s,t_end_s,seconds_used,rows,A_mean_inH2O,A_sd_inH2O,B_mean_inH2O,B_sd_inH2O,C_mean_inH2O,C_sd_inH2O,box_mean_inH2O,B_minus_C_inH2O,box_mean_Pa,A_avg_5s,P_room_Pa,T_room_C,T_box_C,Vs_V
+1,OFF,A B C,2026-10-16 09:17:05.718,2026-10-16 09:17:41.216,0.100,35.600,36.0,72,-0.0005,0.0009,0.0016,0.0070,0.0106,0.0071,0.0061,-0.0090,1.51,-0.0006,101123.54,22.840,21.618,5.1524

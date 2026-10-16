@@ -6,7 +6,7 @@
       "label": "Analyze latest run",
       "type": "process",
       "command": "python",
-      "args": ["${workspaceFolder}/tools/analyze_run.py"],
+      "args": ["${workspaceFolder}/tools/analyze_run.py", "--open"],
       "options": { "cwd": "${workspaceFolder}" },
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },

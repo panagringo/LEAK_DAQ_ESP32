@@ -27,7 +27,7 @@ import os
 import statistics as st
 import sys
 
-PA_PER_UNIT = {"inH2O": 248.64, "mmH2O": 9.789, "Pa": 1.0}
+PA_PER_UNIT = {"inH2O": 248.64, "mmH2O": 9.789, "Pa": 1.0, "kPa": 1000.0}
 
 # step thresholds in Pa: box noise is ~2 Pa, pitot noise ~40 Pa (row to row)
 BOX_STEP_PA = 6.0
@@ -73,6 +73,11 @@ def load(path):
         rows = list(csv.DictReader(f))
     if not rows:
         sys.exit("Empty log: %s" % path)
+    bad = [i + 2 for i, r in enumerate(rows) if num(r.get("t_s")) is None]   # +2: header + 1-based
+    if bad:
+        print("Warning: skipping %d corrupted row(s) (unreadable t_s) at line(s) %s"
+              % (len(bad), ", ".join(map(str, bad))))
+        rows = [r for r in rows if num(r.get("t_s")) is not None]
     header = list(rows[0].keys())
     unit_col = find_col(header, "units=")          # old logs: a separate units=... column
     if unit_col:
@@ -80,7 +85,20 @@ def load(path):
     else:                                          # new logs: A_pitot_room_inH2O etc.
         a = find_col(header, "A_pitot") or ""
         units = next((u for u in PA_PER_UNIT if a.endswith("_" + u)), "inH2O")
-    return rows, header, units
+    return rows, header, to_kpa(rows, header, units), units
+
+
+def to_kpa(rows, header, units):
+    # everything downstream (CSV, table, plot) works in kPa, whatever units were logged.
+    # 0.0001 kPa = 0.1 Pa matches the sensor resolution; the manometer is read by eye to ~1 Pa.
+    k = PA_PER_UNIT.get(units, 1.0) / 1000.0
+    for h in header:
+        if h and h.startswith(("A_", "B_", "C_", "mano")):
+            f = "%.3f" if h.startswith("mano") else "%.4f"
+            for r in rows:
+                v = num(r.get(h))
+                r[h] = "" if v is None else f % (v * k)
+    return "kPa"
 
 
 def decimals(values):
@@ -185,7 +203,7 @@ def write_csv(results, rows, units, path):
     dec["mano"] = decimals(r.get(find_col(rows[0].keys(), "mano")) for r in rows) + 1   # read by eye: coarser
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["%s_%s" % (c, units) if c in PRESSURE_KEYS else c for c in cols])
+        w.writerow(["%s_%s" % (c, units) if c in PRESSURE_KEYS or c.startswith("A_avg") else c for c in cols])
         for r in results:
             w.writerow([fmt(r[c], dec.get(c, 4)) for c in cols])
 
@@ -231,7 +249,7 @@ def tint(color, alpha):
     return tuple(1 - alpha * (1 - c) for c in to_rgb(color))
 
 
-def plot(series, plateaus, results, rows, units, path, title, trim_s):
+def plot(series, plateaus, results, rows, units, log_units, path, title, trim_s):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -241,7 +259,6 @@ def plot(series, plateaus, results, rows, units, path, title, trim_s):
     t, A, B, C, _ = series
     nan = lambda v: [x if x is not None else float("nan") for x in v]   # noqa: E731
     d = decimals(v for r in rows for k, v in r.items() if k and k.startswith(("A_", "B_", "C_"))) + 1
-    to_pa = PA_PER_UNIT.get(units, 1.0)
 
     # figure: header text, graph, results table (table grows with the number of sections)
     table_h = 0.42 * (len(results) + 1)
@@ -263,7 +280,7 @@ def plot(series, plateaus, results, rows, units, path, title, trim_s):
     fig.text(0.065, 1 - 0.32 / fig.get_figheight(), "Leak Rig Run  \u2014  " + title.replace(".csv", ""),
              fontsize=15, fontweight="bold", color="#1f2933", va="top")
     fig.text(0.065, 1 - 0.68 / fig.get_figheight(),
-             "   \u00b7   ".join(x for x in (when, "%.0f s, %d rows" % (t[-1], len(rows)), "units: " + units,
+             "   \u00b7   ".join(x for x in (when, "%.0f s, %d rows" % (t[-1], len(rows)), "units: kPa (logged in %s)" % log_units,
                                             "   ".join(env)) if x),
              fontsize=9.5, color="#52606d", va="top")
 
@@ -336,7 +353,8 @@ def plot(series, plateaus, results, rows, units, path, title, trim_s):
                   fontsize=11, fontweight="bold", color="#1f2933", loc="left", pad=8)
     fig.text(0.065, 0.2 / fig.get_figheight(),
              "Settling periods are detected automatically and excluded; each section is trimmed %.1f s at both "
-             "ends.  Box avg = mean of B and C.  1 %s = %.2f Pa." % (trim_s, units, to_pa),
+             "ends.  Box avg = mean of B and C.  Logged in %s (1 %s = %.2f Pa), converted to kPa." % (
+                 trim_s, log_units, log_units, PA_PER_UNIT.get(log_units, 1.0)),
              fontsize=8.5, color="#52606d", va="bottom")
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
@@ -354,10 +372,10 @@ def main():
     args = ap.parse_args()
 
     path = args.csv or newest_log(project)
-    rows, header, units = load(path)
+    rows, header, units, log_units = load(path)
     results, plateaus, series, units, skipped = detect(rows, header, units, args.window, args.trim, args.min)
-    print("Run: %s  (%d rows, %.0f s, units %s)  trim %.1f s, min %.1f s"
-          % (os.path.basename(path), len(rows), series[0][-1], units, args.trim, args.min))
+    print("Run: %s  (%d rows, %.0f s, units %s, logged in %s)  trim %.1f s, min %.1f s"
+          % (os.path.basename(path), len(rows), series[0][-1], units, log_units, args.trim, args.min))
     if not results:
         print("No steady plateaus found. Try --min smaller or --window smaller.")
         return
@@ -369,7 +387,7 @@ def main():
     base = path[:-4]
     write_csv(results, rows, units, base + "_trimmed.csv")
     print("\nSaved %s" % (base + "_trimmed.csv"))
-    if plot(series, plateaus, results, rows, units, base + "_trimmed.png", os.path.basename(path), args.trim):
+    if plot(series, plateaus, results, rows, units, log_units, base + "_trimmed.png", os.path.basename(path), args.trim):
         print("Saved %s" % (base + "_trimmed.png"))
         if args.open and hasattr(os, "startfile"):
             os.startfile(base + "_trimmed.png")

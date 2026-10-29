@@ -1,15 +1,18 @@
 /*
-  leak_sensors.ino  -  sensor readout + manometer calibrationn
-  ESP32 DevKit V1 + ADS1115 + 1 x MPX5010DP + 4 x BMP280/BME280
+  LEAK_DAQ_ESP32  -  REV-C  -  sensor readout + manometer calibration
+  ESP32 DevKit V1 + ADS1115 + 3 x MPX5010DP + 4 x BMP280/BME280
 
-  I2C bus 0 (D21 SDA, D22 SCL): ADS1115 0x48, BME room1 0x76, BME room2 0x77
-  I2C bus 1 (D33 SDA, D32 SCL): BME box1 0x76, BME box2 0x77
+  I2C bus 0 (D21 SDA, D22 SCL): ADS1115 0x48, room1 0x76, room2 0x77
+  I2C bus 1 (D33 SDA, D32 SCL): box1 0x76, box2 0x77
 
   CHANNELS (all are pressure DIFFERENCES in Pa; each can be calibrated)
-    A  MPX on ADS A0   P1 (loalgo) = pitot tube facing into the flow, P2 = open to room   (pitot - room, see MPX_SIGN)
-    B  BME box1 minus average of the room BMEs
-    C  BME box2 minus average of the room BMEs
-  Also printed: room pressure, temperatures, 5 V supply.
+    A  MPX A on ADS A0   P1 (logo) = pitot,   P2 = box tap    q = pitot - box (velocity pressure)
+    B  MPX B on ADS A1   P1 (logo) = box tap, P2 = room       box - room
+    C  MPX C on ADS A2   P1 (logo) = pitot,   P2 = room       pitot - room (check: C = A + B)
+    D  BME box (avg of box1, box2) minus BME room (avg)       cross-check on B, not used for results
+  ADS A3 = 5 V supply through a 10k/10k divider. Each MPX output goes through 1 kOhm with
+  100 nF to GND at the ADS input. Wiring: wiring/REV-C_*.png and wiring/REV-C_solder_guide.html.
+  The BMEs also give room pressure, temperature and humidity (for air density) and box temperature.
 
   MANOMETER: Dwyer U-tube, 0.826 SG red fluid, scale in inH2O for VERTICAL use,
   zero in the middle counting up both ways. Mounted on the box side at MANO_ANGLE_DEG
@@ -21,15 +24,12 @@
 
   CALIBRATION (Serial Monitor, 115200 baud, "Newline")
     z            zero again: all ports open to room air, vac off
-    cal A        guided calibration of channel A against the manometer
+    cal A        guided calibration of channel A (or B, C, D) against the manometer
     units in     units for the live stream: in (inH2O), mm (mmH2O) or pa
-    p            print calibration     s  pause/resume stream    h  help
+    p            print calibration     h  help
 
-  Libraries (Arduino Library Manager): Adafruit BME280 Library, Adafruit ADS1X15,
-  Adafruit Unified Sensor.  
-   Board: "ESP32 Dev Module".
+  Older revisions: git checkout REV-B (1 MPX + BME box sensors). See README.md.
 */
-
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -42,6 +42,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+
+#define FW_REV "REV-C"
 
 // ---------------------------------------------------------------- pins / setup
 #define SDA0 21
@@ -60,23 +62,24 @@ const float PA_PER_IN = RHO_WATER * G0 * 0.0254f;   // 248.64 Pa per inch of wat
 const float PA_PER_MM = RHO_WATER * G0 * 0.001f;    // 9.789 Pa per mm of water
 const float MPX_SENS = 0.09f;                    // Vout/Vs per kPa (datasheet)
 const float MPX_ZERO_NOM = 0.04f;                // Vout/Vs at 0 kPa (datasheet)
-// The MPX5010DP only reads P1 > P2. Pitot setup: the pipe tube faces INTO the flow on P1 (logo),
-// P2 open to the room, so A = pitot (total) pressure - room and reads positive.
-// If the pipe tube is ever moved to P2 to read suction, set -1 so A still reads pipe - room.
-const float MPX_SIGN = 1.0f;
-const float MPX_FLOOR = 0.004f;                  // Vout/Vs below this = output pinned at 0 V (reversed past range)
+const float MPX_FLOOR = 0.004f;                  // Vout/Vs below this = output pinned at 0 V (pressure on the wrong port)
 const unsigned long SETTLE_MS = 5000;            // sensors settle this long before the boot auto-zero
 
 // ---------------------------------------------------------------- channels
-const int NCH = 3;                   // 0 = MPX on ADS A0; 1, 2 = box BMEs minus room
-const char CH_NAME[NCH] = {'A', 'B', 'C'};
-const char *CH_DESC[NCH] = {"MPX pitot-room","BME box1-room", "BME box2-room"};
-const int CH_BME[NCH] = {-1, 1, 3};  // which bme[] slot each box channel reads
+const int NMPX = 3;                  // A, B, C are MPX sensors on ADS A0, A1, A2
+const int NCH = 4;                   // + D = BME box minus BME room
+const char CH_NAME[NCH] = {'A', 'B', 'C', 'D'};
+const char *CH_DESC[NCH] = {"MPX pitot-box", "MPX box-room", "MPX pitot-room", "BME box-room"};
+// Set false for an MPX that is not fitted: its column stays blank and it is never flagged.
+const bool HAVE_MPX[NMPX] = {true, true, true};
+// Every MPX is plumbed so P1 (logo port) is the higher pressure and reads positive.
+// If a sensor ever has to be plumbed the other way round, set its entry to -1.
+const float MPX_SIGN[NMPX] = {1.0f, 1.0f, 1.0f};
 
 struct Cal {
-  uint32_t version = 4;
-  float zero[NCH] = {MPX_ZERO_NOM, 0, 0};  // MPX: ratio; BME: Pa
-  float gain[NCH] = {1, 1, 1};
+  uint32_t version = 5;
+  float zero[NCH] = {MPX_ZERO_NOM, MPX_ZERO_NOM, MPX_ZERO_NOM, 0};  // MPX: Vout/Vs ratio; D: Pa
+  float gain[NCH] = {1, 1, 1, 1};
   float bmeOff[4] = {0, 0, 0, 0};    // Pa, each BME relative to room1 at zero
   float divK = 2.0f;                 // Vs = divK * V(A3)
   uint8_t units = 0;                 // 0 inH2O, 1 mmH2O, 2 Pa (live stream only)
@@ -103,21 +106,23 @@ bool bus1Ok = true;                  // false when a bus-1 line is stuck low at 
 // "GY-BME/PMP280" boards can be either chip; each slot uses whichever library fits
 float baroPressure(int i) { return bmp[i] ? bmp[i]->readPressure() : bme[i].readPressure(); }
 float baroTemp(int i)     { return bmp[i] ? bmp[i]->readTemperature() : bme[i].readTemperature(); }
+float baroHum(int i)      { return bmp[i] ? NAN : bme[i].readHumidity(); }   // BMP280 has no humidity
 Preferences prefs;
+const char *PREFS_NS = "leakrevc";   // REV-B used "leaksens", so flashing back to REV-B keeps its calibration
 
 struct Reading {
   float vs = NAN;
-  float raw[NCH];                    // MPX: Vout/Vs ratio; BME channels: Pa difference before cal
+  float raw[NCH];                    // MPX: Vout/Vs ratio; D: Pa difference before cal
   float dp[NCH];                     // calibrated Pa
-  bool over = false;                 // MPX past the ADC's range
-  bool under = false;                // MPX output pinned at 0 V: pressure on the wrong port, or tube on the wrong side
-  float p[4], t[4];
+  bool over[NMPX] = {false, false, false};    // MPX past the ADC's range
+  bool under[NMPX] = {false, false, false};   // MPX output pinned at 0 V: tubes on the wrong ports
+  float p[4], t[4], rh[4];
 };
 
 // ---------------------------------------------------------------- storage
-void saveCal() { prefs.begin("leaksens", false); prefs.putBytes("cal", &cal, sizeof(cal)); prefs.end(); }
+void saveCal() { prefs.begin(PREFS_NS, false); prefs.putBytes("cal", &cal, sizeof(cal)); prefs.end(); }
 void loadCal() {
-  prefs.begin("leaksens", true);
+  prefs.begin(PREFS_NS, true);
   if (prefs.getBytesLength("cal") == sizeof(cal)) {
     Cal tmp; prefs.getBytes("cal", &tmp, sizeof(tmp));
     if (tmp.version == cal.version) cal = tmp;
@@ -163,45 +168,54 @@ float mpxVolts(uint8_t ch, bool &over) {
   return v;
 }
 
+bool isMpx(int c) { return c < NMPX; }
+
+float avg2(bool okA, float a, bool okB, float b) {
+  if (okA && okB) return 0.5f * (a + b);
+  if (okA) return a;
+  if (okB) return b;
+  return NAN;
+}
+
 Reading readAll() {
   Reading r;
   for (int c = 0; c < NCH; c++) { r.raw[c] = NAN; r.dp[c] = NAN; }
-  for (int i = 0; i < 4; i++) { r.p[i] = r.t[i] = NAN; }
+  for (int i = 0; i < 4; i++) { r.p[i] = r.t[i] = r.rh[i] = NAN; }
 
   if (okAds) {
     float vmax;
     r.vs = cal.divK * adsVolts(3, GAIN_ONE, ADS_AVG, vmax);
-    r.raw[0] = mpxVolts(0, r.over) / r.vs;
-    r.dp[0] = MPX_SIGN * cal.gain[0] * (r.raw[0] - cal.zero[0]) / MPX_SENS * 1000.0f;
-    r.under = r.raw[0] < MPX_FLOOR;
+    for (int c = 0; c < NMPX; c++) {
+      if (!HAVE_MPX[c]) continue;
+      r.raw[c] = mpxVolts(c, r.over[c]) / r.vs;
+      r.dp[c] = MPX_SIGN[c] * cal.gain[c] * (r.raw[c] - cal.zero[c]) / MPX_SENS * 1000.0f;
+      r.under[c] = r.raw[c] < MPX_FLOOR;
+    }
   }
   for (int i = 0; i < 4; i++) {
     if (!okBme[i]) continue;
     r.p[i] = baroPressure(i) - cal.bmeOff[i];
     r.t[i] = baroTemp(i);
+    r.rh[i] = baroHum(i);
   }
-  float room = NAN;
-  if (okBme[0] && okBme[2]) room = 0.5f * (r.p[0] + r.p[2]);
-  else if (okBme[0]) room = r.p[0];
-  else if (okBme[2]) room = r.p[2];
-  if (!isnan(room))
-    for (int c = 1; c < NCH; c++) {
-      if (!okBme[CH_BME[c]]) continue;
-      r.raw[c] = r.p[CH_BME[c]] - room;
-      r.dp[c] = cal.gain[c] * (r.raw[c] - cal.zero[c]);
-    }
+  float room = avg2(okBme[0], r.p[0], okBme[2], r.p[2]);
+  float box = avg2(okBme[1], r.p[1], okBme[3], r.p[3]);
+  if (!isnan(room) && !isnan(box)) {
+    r.raw[3] = box - room;
+    r.dp[3] = cal.gain[3] * (r.raw[3] - cal.zero[3]);
+  }
   return r;
 }
 
 // unscaled Pa for a channel (zero removed, gain NOT applied) - what calibration fits against
 float uncal(const Reading &r, int c) {
-  if (c == 0) return MPX_SIGN * (r.raw[0] - cal.zero[0]) / MPX_SENS * 1000.0f;
+  if (isMpx(c)) return MPX_SIGN[c] * (r.raw[c] - cal.zero[c]) / MPX_SENS * 1000.0f;
   return r.raw[c] - cal.zero[c];
 }
 
 bool chanOk(int c) {
-  if (c == 0) return okAds;
-  return (okBme[0] || okBme[2]) && okBme[CH_BME[c]];
+  if (isMpx(c)) return okAds && HAVE_MPX[c];
+  return (okBme[0] || okBme[2]) && (okBme[1] || okBme[3]);
 }
 
 // average a channel over ms milliseconds; returns mean and standard deviation (unscaled Pa)
@@ -253,7 +267,7 @@ void doZero() {
   const int N = 25;
   double sr[NCH] = {0}, sp[4] = {0};
   int nr[NCH] = {0};
-  // BME offsets first (relative to room1), so the BME channels below use them
+  // BME offsets first (relative to room1), so channel D below uses them
   float oldOff[4]; memcpy(oldOff, cal.bmeOff, sizeof(oldOff));
   for (int i = 0; i < 4; i++) cal.bmeOff[i] = 0;
   for (int k = 0; k < N; k++) {
@@ -262,7 +276,7 @@ void doZero() {
   }
   if (okBme[0]) for (int i = 0; i < 4; i++) cal.bmeOff[i] = okBme[i] ? (sp[i] - sp[0]) / N : 0;
   else memcpy(cal.bmeOff, oldOff, sizeof(oldOff));
-  for (int c = 1; c < NCH; c++) cal.zero[c] = 0;
+  cal.zero[3] = 0;
   for (int k = 0; k < N; k++) {
     Reading r = readAll();
     for (int c = 0; c < NCH; c++) if (!isnan(r.raw[c])) { sr[c] += r.raw[c]; nr[c]++; }
@@ -270,8 +284,10 @@ void doZero() {
   for (int c = 0; c < NCH; c++) if (nr[c]) cal.zero[c] = sr[c] / nr[c];
   saveCal();
   Serial.println("# ZERO done.");
-  if (chanOk(0) && (cal.zero[0] < -0.005f || cal.zero[0] > 0.085f))   // datasheet offset 0-0.425 V at 5 V
-    Serial.printf("# WARNING: MPX zero (%.4f of supply) is outside the datasheet band. Check its wiring.\n", cal.zero[0]);
+  for (int c = 0; c < NMPX; c++)                 // datasheet offset 0-0.425 V at 5 V
+    if (chanOk(c) && (cal.zero[c] < -0.005f || cal.zero[c] > 0.085f))
+      Serial.printf("# WARNING: MPX %c zero (%.4f of supply) is outside the datasheet band. Check its wiring.\n",
+                    CH_NAME[c], cal.zero[c]);
   for (int i = 1; i < 4; i++)
     if (okBme[i] && fabsf(cal.bmeOff[i]) > 150)
       Serial.printf("# NOTE: BME %s reads %.0f Pa off room1 (normal is under about 100). Offset stored.\n",
@@ -287,8 +303,11 @@ void calWizard(int c) {
   Serial.printf("\n# ===== CALIBRATE %c (%s) =====\n", CH_NAME[c], CH_DESC[c]);
   printMano();
   Serial.println("# 1. Manometer: one leg open to the room, the other leg teed onto this sensor's HIGH side.");
-  if (c == 0) Serial.println("#    For the MPX, open its P2 (low) port to the room while calibrating.");
-  else Serial.println("#    For a box BME, the manometer goes on a box tap; the room BMEs stay in the room.");
+  if (isMpx(c)) {
+    Serial.printf("#    MPX %c: tee the manometer onto its P1 (logo) line and open its P2 port to the room.\n", CH_NAME[c]);
+    if (c == 1) Serial.println("#    (B already has P2 on the room, so just tee the manometer onto the box tap.)");
+    else Serial.println("#    Put P2 back on its normal line when you are done.");
+  } else Serial.println("#    For D (BME box), the manometer goes on a box tap; the room BMEs stay in the room.");
   Serial.println("# 2. First point: system OFF, type 0.");
   Serial.println("# 3. System on. Set the outlet slider, wait until the fluid is still.");
   Serial.println("# 4. Type what EACH SIDE of the ruler reads (left right), then Enter, e.g.  1.20 1.15");
@@ -302,8 +321,11 @@ void calWizard(int c) {
       Reading r = readAll();
       float u = uncal(r, c);
       float g = cal.gain[c] * u;
+      const char *warn = "";
+      if (isMpx(c) && r.over[c]) warn = "  OVER RANGE";
+      else if (isMpx(c) && r.under[c]) warn = "  PINNED AT 0 V - swap this MPX's tubes";
       Serial.printf("#   live %c: %.1f Pa = %.2f total on your ruler (uncalibrated %.1f Pa)%s   points: %d\n",
-                    CH_NAME[c], g, g / manoPa(1.0f), u, (c == 0 && r.over) ? "  OVER RANGE" : (c == 0 && r.under) ? "  PINNED AT 0 V - swap the MPX tubes" : "", n);
+                    CH_NAME[c], g, g / manoPa(1.0f), u, warn, n);
     }
     if (!pollLine()) { delay(10); continue; }
     lower(line);
@@ -355,11 +377,11 @@ void calWizard(int c) {
 
 // ---------------------------------------------------------------- misc commands
 void printCal() {
-  Serial.printf("# stream units %s, 5 V divider factor %.4f\n", unitName(), cal.divK);
+  Serial.printf("# firmware %s, stream units %s, 5 V divider factor %.4f\n", FW_REV, unitName(), cal.divK);
   printMano();
   for (int c = 0; c < NCH; c++)
     Serial.printf("# %c %-16s zero %10.5f  gain %.4f  %s\n", CH_NAME[c], CH_DESC[c], cal.zero[c], cal.gain[c],
-                  chanOk(c) ? "" : "(not available)");
+                  chanOk(c) ? "" : (isMpx(c) && !HAVE_MPX[c]) ? "(not fitted: HAVE_MPX)" : "(not available)");
   for (int i = 0; i < 4; i++)
     Serial.printf("# BME %-6s %s  offset %+.1f Pa\n", BME_NAME[i], okBme[i] ? "OK " : "---", cal.bmeOff[i]);
 }
@@ -367,10 +389,10 @@ void printCal() {
 void printHelp() {
   Serial.println(F(
     "# z            zero again (done automatically at power-up; system must be OFF)\n"
-    "# cal A        calibrate channel A against the manometer (A, B or C)\n"
+    "# cal A        calibrate a channel against the manometer (A, B, C or D)\n"
     "# units in     units for the live stream: in, mm or pa\n"
     "# vs 5.02      the 5 V pin as read on a multimeter (once)\n"
-    "# run / log    start recording (saved to logs/ on the PC)    stop   end it\n"
+    "# run / log    start recording (saved to logs/REV-C/ on the PC)    stop   end it\n"
     "# +            (one key, no Enter) next area label A, B, C...     -   slider moving (blank)\n"
     "# area B       label the rows from now on with outlet area B    area   blank (slider moving)\n"
     "# mano 0.30 0.28   manometer left right readings for the current area (goes in the mano column)\n"
@@ -382,8 +404,8 @@ void printHelp() {
 
 void printHeader() {
   const char *u = unitName();
-  Serial.printf("t_s,area,A_pitot_room_%s,A_avg_%lus_%s,B_bme_box1_%s,C_bme_box2_%s,mano_%s,"
-                "P_room_Pa,T_room_C,T_box_C,Vs_V,flags\n", u, A_AVG_N * STREAM_MS / 1000, u, u, u, u);
+  Serial.printf("t_s,area,A_q_pitot_box_%s,A_avg_%lus_%s,B_box_room_%s,C_pitot_room_%s,D_bme_box_room_%s,mano_%s,"
+                "P_room_Pa,T_room_C,RH_room_pct,T_box_C,Vs_V,flags\n", u, A_AVG_N * STREAM_MS / 1000, u, u, u, u, u);
 }
 
 bool streaming = false;              // off until "run" / "log"; the monitor's csvlog filter saves the run
@@ -416,7 +438,7 @@ void handleCommand() {
   else if (!strcmp(cmd, "cal")) {
     int c = arg ? chanIndex(arg[0]) : -1;
     while (c < 0) {                              // no sensor given: ask for one
-      Serial.println("# Calibrate which sensor?  A = pitot   B = box sensor 1   C = box sensor 2   (q = cancel)");
+      Serial.println("# Calibrate which sensor?  A = pitot-box   B = box-room   C = pitot-room   D = BME box   (q = cancel)");
       while (!pollLine()) delay(10);
       lower(line);
       if (!strcmp(line, "q")) return;
@@ -439,7 +461,7 @@ void handleCommand() {
     if (streaming) { Serial.println("# already running - type stop first"); return; }
     streaming = true; lastOut = millis() - STREAM_MS; runStart = millis(); aCount = 0;
     areaLabel[0] = 0; manoReading = NAN; nextArea = 0;
-    Serial.println("# LOG START"); printHeader();
+    Serial.println("# LOG START " FW_REV); printHeader();
     Serial.println("# Press + for the next area (A, B, C...), - while moving the slider. No Enter needed.");
   }
   else if (!strcmp(cmd, "area")) {
@@ -507,7 +529,7 @@ void scanAll() { scanBus(Wire, 0); if (bus1Ok) scanBus(Wire1, 1); }
 void setup() {
   Serial.begin(115200);
   delay(400);
-  Serial.println("\n# Leak rig sensors starting");
+  Serial.println("\n# Leak rig sensors starting  (firmware " FW_REV ": 3 x MPX + 4 x BME)");
   // idle I2C lines must sit HIGH (pulled up by the sensor boards); LOW = short, missing pull-up or unpowered board
   const int idlePins[4] = {SDA0, SCL0, SDA1, SCL1};
   const char *idleName[4] = {"bus0 SDA D21", "bus0 SCL D22", "bus1 SDA D33", "bus1 SCL D32"};
@@ -522,7 +544,7 @@ void setup() {
   Wire.begin(SDA0, SCL0, 100000);
   Wire.setTimeOut(20);
   if (bus1Ok) { Wire1.begin(SDA1, SCL1, 100000); Wire1.setTimeOut(20); }
-  else Serial.println("# bus1 SKIPPED (a stuck line would hang the ESP32): box sensors B/C disabled until fixed");
+  else Serial.println("# bus1 SKIPPED (a stuck line would hang the ESP32): box BMEs and channel D disabled until fixed");
   loadCal();
   scanAll();
 
@@ -567,6 +589,12 @@ void setup() {
   Serial.println("# Ready: turn the system on, then type run (or log) to record, stop to end.");
 }
 
+// prints a pressure column, blank when the channel has no reading
+void col(char *buf, size_t n, float pa) {
+  if (isnan(pa)) buf[0] = 0;
+  else snprintf(buf, n, "%.*f", unitDec(), toUnits(pa));
+}
+
 void loop() {
   if (pollLine()) handleCommand();
   if (!streaming || millis() - lastOut < STREAM_MS) return;
@@ -575,11 +603,16 @@ void loop() {
   Reading r = readAll();
   float pRoom = okBme[0] ? r.p[0] : (okBme[2] ? r.p[2] : NAN);
   float tRoom = okBme[0] ? r.t[0] : (okBme[2] ? r.t[2] : NAN);
+  float rhRoom = !isnan(r.rh[0]) ? r.rh[0] : r.rh[2];
   float tBox = okBme[1] ? r.t[1] : (okBme[3] ? r.t[3] : NAN);
 
-  char flags[48] = "";
-  if (r.over) strcat(flags, "OVERA;");
-  if (r.under) strcat(flags, "PINNEDA;");
+  char flags[64] = "";
+  for (int c = 0; c < NMPX; c++) {
+    if (!HAVE_MPX[c] || !okAds) continue;
+    char f[12];
+    if (r.over[c]) { snprintf(f, sizeof(f), "OVER%c;", CH_NAME[c]); strcat(flags, f); }
+    if (r.under[c]) { snprintf(f, sizeof(f), "PINNED%c;", CH_NAME[c]); strcat(flags, f); }
+  }
   if (okAds && (r.vs < 4.5f || r.vs > 5.3f)) strcat(flags, "VS;");
   if (!okAds) strcat(flags, "NO_ADS;");
 
@@ -587,17 +620,20 @@ void loop() {
   float aAvg = NAN;
   if (!isnan(r.dp[0])) {
     aHist[aCount % A_AVG_N] = r.dp[0]; aCount++;
-    int n = aCount < A_AVG_N ? aCount : A_AVG_N;
+    int n = aCount < (int)A_AVG_N ? aCount : A_AVG_N;
     float s = 0; for (int i = 0; i < n; i++) s += aHist[i];
     aAvg = s / n;
   }
 
   char mano[12] = "";
   if (!isnan(manoReading)) snprintf(mano, sizeof(mano), "%.*f", manoDec(), toUnits(manoReading));
+  char cA[16], cAv[16], cB[16], cC[16], cD[16], rh[12] = "";
+  col(cA, sizeof(cA), r.dp[0]); col(cAv, sizeof(cAv), aAvg); col(cB, sizeof(cB), r.dp[1]);
+  col(cC, sizeof(cC), r.dp[2]); col(cD, sizeof(cD), r.dp[3]);
+  if (!isnan(rhRoom)) snprintf(rh, sizeof(rh), "%.1f", rhRoom);
 
   // t_s to the ms, P 0.1 Pa, T 0.01 C (BME280 resolution), Vs 0.1 mV (ADS1115 LSB x divider = 0.25 mV, 8x averaged)
-  int d = unitDec();
-  Serial.printf("%.3f,%s,%.*f,%.*f,%.*f,%.*f,%s,%.1f,%.2f,%.2f,%.4f,%s\n",
-                (millis() - runStart) / 1000.0, areaLabel, d, toUnits(r.dp[0]), d, toUnits(aAvg), d, toUnits(r.dp[1]),
-                d, toUnits(r.dp[2]), mano, pRoom, tRoom, tBox, r.vs, flags);
+  Serial.printf("%.3f,%s,%s,%s,%s,%s,%s,%s,%.1f,%.2f,%s,%.2f,%.4f,%s\n",
+                (millis() - runStart) / 1000.0, areaLabel, cA, cAv, cB, cC, cD, mano,
+                pRoom, tRoom, rh, tBox, r.vs, flags);
 }

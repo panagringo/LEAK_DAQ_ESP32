@@ -1,11 +1,12 @@
 """
-PlatformIO monitor filter: saves each run to logs/run_YYYY-MM-DD_HH-MM-SS.csv
+PlatformIO monitor filter: saves each run to logs/<REV>/run_YYYY-MM-DD_HH-MM-SS.csv
 
 Every saved row starts with a "time" column: the PC's clock (YYYY-MM-DD HH:MM:SS.mmm) when the
 line arrived, since the ESP32 has no real-time clock. t_s is still the ESP32's own run time.
 
-The ESP32 prints "# LOG START" when you type run / log and "# LOG STOP" when you
-type stop. Everything between them that isn't a "#" comment line goes into the file.
+The ESP32 prints "# LOG START REV-C" when you type run / log and "# LOG STOP" when you
+type stop. The revision after LOG START picks the folder (logs/REV-C/); firmware that
+prints no revision (REV-B and older) saves to logs/. Everything between them that isn't a "#" comment line goes into the file.
 When the run ends, a second file ..._summary.csv holds the average of every column
 for each outlet area label (rows with a blank area are left out).
 Enabled by "csvlog" in monitor_filters (platformio.ini).
@@ -28,9 +29,9 @@ class CsvLog(DeviceMonitorFilterBase):
         self._rows = []
         return self
 
-    def _open(self):
+    def _open(self, rev=""):
         notes = self._close()
-        log_dir = os.path.join(self.project_dir or os.getcwd(), "logs")
+        log_dir = os.path.join(self.project_dir or os.getcwd(), "logs", *([rev] if rev else []))
         os.makedirs(log_dir, exist_ok=True)
         self._path = os.path.join(log_dir, datetime.now().strftime("run_%Y-%m-%d_%H-%M-%S.csv"))
         self._file = open(self._path, "w", encoding="utf-8", newline="")
@@ -67,7 +68,7 @@ class CsvLog(DeviceMonitorFilterBase):
         cols = [i for i, h in enumerate(header) if i not in skip and h and not h.startswith("units=") and h != "flags"]
         dec = {i: decimals(r[i] for r in data if len(r) == len(header)) for i in cols}
         out = [["area", "rows", "time_start", "time_end", "t_start_s", "t_end_s"] + [header[i] + "_mean" for i in cols]
-               + [header[i] + "_sd" for i in cols if header[i].startswith(("A_", "B_", "C_"))]]
+               + [header[i] + "_sd" for i in cols if header[i].startswith(SD_COLS)]]
         for area, rs in groups.items():
             line = [area, len(rs), rs[0][iw] if iw is not None else "", rs[-1][iw] if iw is not None else "",
                     rs[0][it], rs[-1][it]]
@@ -82,7 +83,7 @@ class CsvLog(DeviceMonitorFilterBase):
                 mean = sum(v) / len(v) if v else ""
                 # a mean of many rows is good to one more decimal than a single row
                 line.append("%.*f" % (dec[i] + 1, mean) if v else "")
-                if header[i].startswith(("A_", "B_", "C_")):
+                if header[i].startswith(SD_COLS):
                     sd = (sum((x - mean) ** 2 for x in v) / (len(v) - 1)) ** 0.5 if len(v) > 1 else ""
                     sds.append("%.*f" % (dec[i] + 1, sd) if sd != "" else "")
             out.append(line + sds)
@@ -101,7 +102,9 @@ class CsvLog(DeviceMonitorFilterBase):
             line, self._buf = self._buf.split("\n", 1)
             line = line.rstrip("\r")
             if line.startswith("# LOG START"):
-                shown += line + "\n" + self._open()
+                rev = line[len("# LOG START"):].strip()
+                rev = rev if rev.startswith("REV-") and rev[4:].isalnum() else ""
+                shown += line + "\n" + self._open(rev)
             elif line.startswith("# LOG STOP") or line.startswith("# Leak rig sensors starting"):
                 shown += line + "\n" + self._close()      # stop typed, or the ESP32 reset mid-run
             elif self._file and line and not line.startswith("#"):
@@ -119,6 +122,9 @@ class CsvLog(DeviceMonitorFilterBase):
         return shown
 
     SHOW_EVERY = 4   # 4 lines x 0.5 s = one line on screen every 2 s while recording
+
+
+SD_COLS = ("A_", "B_", "C_", "D_")   # pressure channels: the summary also gets their standard deviation
 
 
 def decimals(values):

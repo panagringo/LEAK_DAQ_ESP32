@@ -27,8 +27,9 @@ REVISIONS
 THE SENSORS  (all readings are pressure DIFFERENCES; P1 = logo port = higher pressure)
 --------------------------------------------------------------------------------------
   A   MPX A on ADS1115 A0   P1 pitot,   P2 box tap      q = pitot - box
-  B   MPX B on ADS1115 A1   P1 box tap, P2 room         box - room
-  C   MPX C on ADS1115 A2   P1 pitot,   P2 room         pitot - room   (should equal A + B)
+  C   MPX C on ADS1115 A1   P1 pitot,   P2 room         pitot - room   (should equal A + B)
+  B   MPX B on ADS1115 A2   P1 box tap, P2 room         box - room
+  (pitot sensors on A0/A1, box sensor on A2; to remap, edit ADS_IN in src\main.cpp)
   D   BME box - BME room                                rough check on B
   ADS1115 A3 = 5 V supply through 10k/10k.  Each MPX output: 1 kOhm in series, 100 nF to GND.
   I2C bus 0  D21 SDA, D22 SCL : ADS1115 0x48, room1 0x76, room2 0x77

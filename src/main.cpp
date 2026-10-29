@@ -7,8 +7,9 @@
 
   CHANNELS (all are pressure DIFFERENCES in Pa; each can be calibrated)
     A  MPX A on ADS A0   P1 (logo) = pitot,   P2 = box tap    q = pitot - box (velocity pressure)
-    B  MPX B on ADS A1   P1 (logo) = box tap, P2 = room       box - room
-    C  MPX C on ADS A2   P1 (logo) = pitot,   P2 = room       pitot - room (check: C = A + B)
+    C  MPX C on ADS A1   P1 (logo) = pitot,   P2 = room       pitot - room (check: C = A + B)
+    B  MPX B on ADS A2   P1 (logo) = box tap, P2 = room       box - room
+       (the two pitot sensors share A0/A1; box - room is on A2. Change ADS_IN below to remap.)
     D  BME box (avg of box1, box2) minus BME room (avg)       cross-check on B, not used for results
   ADS A3 = 5 V supply through a 10k/10k divider. Each MPX output goes through 1 kOhm with
   100 nF to GND at the ADS input. Wiring: wiring/REV-C_*.png and wiring/REV-C_solder_guide.html.
@@ -70,6 +71,9 @@ const int NMPX = 3;                  // A, B, C are MPX sensors on ADS A0, A1, A
 const int NCH = 4;                   // + D = BME box minus BME room
 const char CH_NAME[NCH] = {'A', 'B', 'C', 'D'};
 const char *CH_DESC[NCH] = {"MPX pitot-box", "MPX box-room", "MPX pitot-room", "BME box-room"};
+// Which ADS1115 input each MPX channel is wired to: A on A0, B on A2, C on A1 (pitot sensors on A0/A1).
+// If sensors are moved to other inputs, change only this line; channel letters and log columns stay the same.
+const uint8_t ADS_IN[NMPX] = {0, 2, 1};
 // Set false for an MPX that is not fitted: its column stays blank and it is never flagged.
 const bool HAVE_MPX[NMPX] = {true, true, true};
 // Every MPX is plumbed so P1 (logo port) is the higher pressure and reads positive.
@@ -187,7 +191,7 @@ Reading readAll() {
     r.vs = cal.divK * adsVolts(3, GAIN_ONE, ADS_AVG, vmax);
     for (int c = 0; c < NMPX; c++) {
       if (!HAVE_MPX[c]) continue;
-      r.raw[c] = mpxVolts(c, r.over[c]) / r.vs;
+      r.raw[c] = mpxVolts(ADS_IN[c], r.over[c]) / r.vs;
       r.dp[c] = MPX_SIGN[c] * cal.gain[c] * (r.raw[c] - cal.zero[c]) / MPX_SENS * 1000.0f;
       r.under[c] = r.raw[c] < MPX_FLOOR;
     }
@@ -378,6 +382,7 @@ void calWizard(int c) {
 // ---------------------------------------------------------------- misc commands
 void printCal() {
   Serial.printf("# firmware %s, stream units %s, 5 V divider factor %.4f\n", FW_REV, unitName(), cal.divK);
+  Serial.printf("# MPX inputs: A on ADS A%d, B on ADS A%d, C on ADS A%d\n", ADS_IN[0], ADS_IN[1], ADS_IN[2]);
   printMano();
   for (int c = 0; c < NCH; c++)
     Serial.printf("# %c %-16s zero %10.5f  gain %.4f  %s\n", CH_NAME[c], CH_DESC[c], cal.zero[c], cal.gain[c],

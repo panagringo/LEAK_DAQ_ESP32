@@ -9,12 +9,12 @@ the leak area.
 [Revisions](#revisions).
 
 ```
- pitot ─┬─► MPX A (pitot − box)  ─┐
-        └─► MPX C (pitot − room) ─┼─► ADS1115 ─┐
- box ───┬─► MPX B (box − room)   ─┘            │
-        └─  (tee to MPX A P2)                  ├──► ESP32 ──USB──► VS Code ──► logs/REV-C/run_*.csv ──► Analyze ──► *_trimmed.csv + plot
- box sensors  (BME/BMP280 ×2, I2C bus 1) ──────┤
- room sensors (BME/BMP280 ×2, I2C bus 0) ──────┘
+ pitot ─┬─► MPX A (pitot − box)  ──► ADS1115 A0 ─┐
+        └─► MPX C (pitot − room) ──► ADS1115 A1 ─┤
+ box ───┬─► MPX B (box − room)   ──► ADS1115 A2 ─┤
+        └─► MPX A port P2                        ├──► ESP32 ──USB──► VS Code ──► logs/REV-C/run_*.csv ──► Analyze
+ box sensors  (BME/BMP280 ×2, I2C bus 1) ────────┤
+ room sensors (BME/BMP280 ×2, I2C bus 0) ────────┘
 ```
 
 ---
@@ -93,9 +93,12 @@ Full details, including a hole-by-hole wire list and the parts list, are in
 |---|---|---|
 | I2C bus 0 (room side) | D21 SDA, D22 SCL | ADS1115 `0x48`, room1 `0x76`, room2 `0x77` |
 | I2C bus 1 (box side) | D33 SDA, D32 SCL | box1 `0x76`, box2 `0x77` |
-| ADS1115 A0 | through 1 kΩ, 100 nF to GND | MPX A output |
-| ADS1115 A1 | through 1 kΩ, 100 nF to GND | MPX B output |
-| ADS1115 A2 | through 1 kΩ, 100 nF to GND | MPX C output |
+| ADS1115 A0 | through 1 kΩ, 100 nF to GND | MPX A output (pitot − box) |
+| ADS1115 A1 | through 1 kΩ, 100 nF to GND | MPX C output (pitot − room) |
+| ADS1115 A2 | through 1 kΩ, 100 nF to GND | MPX B output (box − room) |
+
+The two pitot sensors are on A0 and A1 and the box sensor is on A2. That order is set by one line in
+`src/main.cpp` (`ADS_IN`); if you move a sensor to another input, change that line and nothing else.
 | ADS1115 A3 | 10k/10k divider, 100 nF to GND | 5 V supply |
 
 Each MPX sits on its own small board with 1 µF + 10 nF from pin 3 to pin 2 and 470 pF from pin 1
@@ -117,8 +120,8 @@ P1 is the port on the logo side. It's always the higher pressure.
 | MPX | ADS | P1 | P2 | Reads |
 |---|---|---|---|---|
 | **A** | A0 | pitot | box tap | q = pitot − box (velocity pressure) |
-| **B** | A1 | box tap | open to room | box − room |
-| **C** | A2 | pitot | open to room | pitot − room, should equal A + B |
+| **B** | A2 | box tap | open to room | box − room |
+| **C** | A1 | pitot | open to room | pitot − room, should equal A + B |
 
 Tee the box tap to A P2 and B P1, and the pitot line to A P1 and C P1. Box pressure is the right
 static reference for the pitot because the inlet discharges into the box as a free jet.
@@ -128,8 +131,8 @@ static reference for the pitot because the inlet discharges into the box as a fr
 | Ch | Sensor | Measures |
 |---|---|---|
 | **A** | MPX A on ADS1115 A0 | pitot − box (q) |
-| **B** | MPX B on ADS1115 A1 | box − room |
-| **C** | MPX C on ADS1115 A2 | pitot − room (closure check) |
+| **B** | MPX B on ADS1115 A2 | box − room |
+| **C** | MPX C on ADS1115 A1 | pitot − room (closure check) |
 | **D** | BME box (avg of box1, box2) − BME room (avg) | box − room, rough cross-check on B |
 
 BMP280 boards work too (no humidity, so `RH_room_pct` stays blank). If you leave MPX C off, set

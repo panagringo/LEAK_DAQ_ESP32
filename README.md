@@ -221,18 +221,23 @@ Pick one of these:
   ```
 
 The script reads the column names to tell which DAQ revision recorded the log. It finds the steady
-periods on its own, so it still works if you forgot to label areas. For each steady period with the
-system on, it works out:
+periods on its own, so it still works if you forgot to label areas; when you did label them, each
+new label starts a new section. For each steady period with the system on, it works out:
 
 | Result | Formula | Notes |
 |---|---|---|
-| `q_Pa` | REV-C: A; REV-B: A − box | velocity pressure at the pitot |
+| `q_Pa` | REV-C: A (or C − B if A isn't connected); REV-B: A − box | velocity pressure at the pitot |
 | `Q_cfm` | k · A_pipe · √(2q / ρ) | inflow. ρ from room pressure, temperature and humidity |
 | `CdA_mm2` | k · A_pipe · √(q / box) | effective leak area (instructor's formula) |
 | `closure_Pa` | C − (A + B) | REV-C only. Should be near 0. If it's large, recalibrate or check the tees. |
 
 A_pipe = 2669 mm² (58.3 mm bore). k = 1 until the pitot is calibrated on the box with known openings.
 Pass the calibrated value with `--k`.
+
+**REV-C channel check.** D (BME box − room) measures the box independently, so the script uses
+whichever MPX column tracks D as box − room, even if it was logged as A (tubes or sensor leads moved).
+An MPX that barely moves while C does is treated as not connected. Both show up as orange
+"Channel check" lines on the plot and in the printout; if you see them, check the plumbing.
 
 It writes these files next to the log:
 

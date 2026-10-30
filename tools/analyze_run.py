@@ -14,15 +14,21 @@ Works on every DAQ revision; it tells them apart by the column names in the log:
     python tools/analyze_run.py --trim 3 --min 8     trim 3 s more off each plateau edge, keep plateaus >= 8 s
     python tools/analyze_run.py --k 0.94             pitot coefficient once it has been calibrated (default 1)
 
-How it finds the settling periods (no need for the area labels to be right):
+How it finds the settling periods:
   1. box = the box - room signal (REV-C: B; REV-B: average of B and C; REV-A: A).
   2. At every row, compare the mean of the WINDOW seconds before with the WINDOW seconds
-     after. A big difference in box (or in the pitot channel A) means the slider/system is changing.
-  3. Rows that are not changing, grouped together, are plateaus. TRIM seconds are cut off
-     both ends of each plateau, and plateaus shorter than MIN seconds are dropped.
+     after. A big difference in box (or in a pitot channel: REV-C A and C, REV-B A) means the
+     slider/system is changing.
+  3. Rows that are not changing, grouped together, are plateaus; a new area label (typed with +)
+     also starts a new plateau. TRIM seconds are cut off both ends of each plateau, and plateaus
+     shorter than MIN seconds are dropped.
+
+REV-C channel check: D (BME box - room) measures the box on its own, so whichever MPX column
+tracks D is taken as the box - room sensor, even if it was logged as A. An MPX that barely moves
+while the pitot (C) does is treated as not connected. Both are reported on the plot.
 
 For each plateau with the system on it also works out (REV-B and REV-C):
-    q       = pitot - box                          (REV-C: A directly; REV-B: A - box)
+    q       = pitot - box                          (REV-C: A, or C - B without A; REV-B: A - box)
     Q_cfm   = k * A_pipe * sqrt(2 q / rho)         inflow, rho from room P, T (and RH if logged)
     CdA_mm2 = k * A_pipe * sqrt(q / box)           effective leak area (instructor's formula)
 k is the pitot coefficient (1 until it is calibrated on the box), A_pipe = 2669 mm2 (58.3 mm bore).
@@ -49,22 +55,24 @@ BOX_STEP_PA = 6.0
 PITOT_STEP_PA = 80.0
 OFF_PA = 5.0          # box and pitot both within this of 0 -> system OFF
 MIN_BOX_PA = 1.0      # below this the leak-area formula is meaningless
+DEAD_SPAN_PA = 10.0   # REV-C: an MPX moving less than this while C moves > 100 Pa is not connected
+SWAP_ERR_PA = 10.0    # REV-C: B further than this (RMS) from D, and A within a third of that -> A is the box sensor
 A_PIPE_MM2 = 2669.0   # 58.3 mm bore of the pitot flange tube
 R_AIR = 287.05
 M3S_TO_CFM = 2118.88
 
 # what each channel is, per revision.  box: channels averaged into the box - room signal;
-# flow: channel watched for steps besides box; q: how velocity pressure is formed (None = not measured)
+# flow: pitot channels watched for steps besides box; q: how velocity pressure is formed (None = not measured)
 REVS = {
-    "REV-A": {"cols": {"A": "A_mpx", "B": "B_", "C": "C_"}, "box": ["A"], "flow": None, "q": None,
+    "REV-A": {"cols": {"A": "A_mpx", "B": "B_", "C": "C_"}, "box": ["A"], "flow": [], "q": None,
               "names": {"A": "A  MPX box − room", "B": "B  BME box 1 − room", "C": "C  BME box 2 − room"},
               "short": {"A": "A MPX box", "B": "B BME box 1", "C": "C BME box 2"},
               "left": ["A", "B", "C"], "right": []},
-    "REV-B": {"cols": {"A": "A_pitot", "B": "B_", "C": "C_"}, "box": ["B", "C"], "flow": "A", "q": "A-box",
+    "REV-B": {"cols": {"A": "A_pitot", "B": "B_", "C": "C_"}, "box": ["B", "C"], "flow": ["A"], "q": "A-box",
               "names": {"A": "A  pitot − room", "B": "B  BME box 1 − room", "C": "C  BME box 2 − room"},
               "short": {"A": "A pitot", "B": "B BME box 1", "C": "C BME box 2"},
               "left": ["B", "C"], "right": ["A"]},
-    "REV-C": {"cols": {"A": "A_q", "B": "B_box", "C": "C_pitot", "D": "D_"}, "box": ["B"], "flow": "A", "q": "A",
+    "REV-C": {"cols": {"A": "A_q", "B": "B_box", "C": "C_pitot", "D": "D_"}, "box": ["B"], "flow": ["A", "C"], "q": "A",
               "names": {"A": "A  q = pitot − box", "B": "B  box − room", "C": "C  pitot − room",
                         "D": "D  BME box − room"},
               "short": {"A": "A q", "B": "B box", "C": "C pitot", "D": "D BME box"},
@@ -116,6 +124,18 @@ def find_col(header, prefix):
     return None
 
 
+def typed(s):
+    # the serial monitor sends Backspace as a character, so a corrected label arrives as "VS\bAC"
+    out = []
+    for ch in s:
+        if ch in "\b\x7f":
+            if out:
+                out.pop()
+        else:
+            out.append(ch)
+    return "".join(out).strip()
+
+
 def load(path):
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -126,6 +146,8 @@ def load(path):
         print("Warning: skipping %d corrupted row(s) (unreadable t_s) at line(s) %s"
               % (len(bad), ", ".join(map(str, bad))))
         rows = [r for r in rows if num(r.get("t_s")) is not None]
+    for r in rows:
+        r["area"] = typed(r.get("area") or "")
     header = list(rows[0].keys())
     unit_col = find_col(header, "units=")          # old logs: a separate units=... column
     if unit_col:
@@ -174,14 +196,39 @@ def air_density(p_pa, t_c, rh_pct=None):
     return (p_pa - pv) / (R_AIR * tk) + pv / (461.5 * tk)
 
 
+def check_rev_c(S, to_pa):
+    """Fix up S so each REV-C channel holds what its name says. Returns notes for the report."""
+    def err_vs_d(ch):
+        d = [a - b for a, b in zip(S[ch], S["D"]) if a is not None and b is not None]
+        return math.sqrt(st.mean(x * x for x in d)) * to_pa if d else math.inf
+
+    def span(ch):
+        v = sorted(x for x in S[ch] if x is not None)
+        return (v[int(0.99 * (len(v) - 1))] - v[int(0.01 * (len(v) - 1))]) * to_pa if v else 0.0
+
+    notes = []
+    ea, eb = err_vs_d("A"), err_vs_d("B")
+    if eb > SWAP_ERR_PA and ea < eb / 3:
+        S["A"], S["B"] = S["B"], S["A"]
+        notes.append("Logged column A is the box − room sensor: it tracks the BME box − room (D) to %.0f Pa RMS, "
+                     "column B is %.0f Pa off. Column A is used as B." % (ea, eb))
+    if span("C") > 100 and span("A") < DEAD_SPAN_PA:
+        notes.append("The pitot − box sensor (%s) is not connected: it moves %.0f Pa while C moves %.0f Pa. "
+                     "q = C − B instead." % ("logged column B" if notes else "A", span("A"), span("C")))
+        S["A"] = [None] * len(S["A"])
+    return notes
+
+
 def detect(rows, header, units, rev, window_s, trim_s, min_s, k, a_pipe_mm2):
     spec = REVS[rev]
     to_pa = PA_PER_UNIT.get(units, 1.0)
     cols = {ch: find_col(header, pre) for ch, pre in spec["cols"].items()}
     t = [num(r["t_s"]) for r in rows]
     S = {ch: [num(r[c]) if c else None for r in rows] for ch, c in cols.items()}
+    notes = check_rev_c(S, to_pa) if rev == "REV-C" else []
     box = [mean([S[ch][i] for ch in spec["box"]]) for i in range(len(rows))]
-    flow = S[spec["flow"]] if spec["flow"] else [None] * len(rows)
+    flows = [S[ch] for ch in spec["flow"]]
+    area = [r.get("area", "") for r in rows]
     dt = st.median([b - a for a, b in zip(t, t[1:])]) if len(t) > 1 else 0.5
     W = max(2, round(window_s / dt))
     n = len(rows)
@@ -189,12 +236,12 @@ def detect(rows, header, units, rev, window_s, trim_s, min_s, k, a_pipe_mm2):
     # 1-2. moving rows: big change between the window before and the window after
     moving = [False] * n
     for i in range(n):
-        for sig, thr in ((box, BOX_STEP_PA), (flow, PITOT_STEP_PA)):
+        for sig, thr in [(box, BOX_STEP_PA)] + [(f, PITOT_STEP_PA) for f in flows]:
             before, after = mean(sig[max(0, i - W):i]), mean(sig[i:i + W])
             if before is not None and after is not None and abs(after - before) * to_pa > thr:
                 moving[i] = True
 
-    # 3. group the steady rows, trim the edges, drop the short ones
+    # 3. group the steady rows (a new area label starts a new group), trim the edges, drop the short ones
     trim_rows = round(trim_s / dt)
     plateaus, skipped, i = [], [], 0
     while i < n:
@@ -202,12 +249,12 @@ def detect(rows, header, units, rev, window_s, trim_s, min_s, k, a_pipe_mm2):
             i += 1
             continue
         j = i
-        while j < n and not moving[j]:
+        while j < n and not moving[j] and area[j] == area[i]:
             j += 1
         lo, hi = i + trim_rows if i > 0 else i, j - trim_rows if j < n else j   # no trim at the run's ends
         if hi > lo and (t[hi - 1] - t[lo]) + dt >= min_s:
             plateaus.append((lo, hi))
-        else:
+        elif j - i >= W:   # shorter than the window is a transient, not a slider position
             skipped.append((t[i], t[j - 1], mean(box[i:j])))
         i = j
 
@@ -218,7 +265,7 @@ def detect(rows, header, units, rev, window_s, trim_s, min_s, k, a_pipe_mm2):
         labels = sorted({r.get("area", "") for r in seg if r.get("area")})
         m = {ch: mean(v[lo:hi]) for ch, v in S.items()}
         bx = mean(box[lo:hi])
-        off = all(abs(x or 0) * to_pa < OFF_PA for x in (bx, mean(flow[lo:hi])))
+        off = all(abs(x or 0) * to_pa < OFF_PA for x in [bx] + [mean(f[lo:hi]) for f in flows])
         res = {
             "plateau": p,
             "state": "OFF" if off else "ON",
@@ -237,6 +284,8 @@ def detect(rows, header, units, rev, window_s, trim_s, min_s, k, a_pipe_mm2):
         q = None
         if spec["q"] == "A" and m["A"] is not None:
             q = m["A"] * to_pa
+        elif spec["q"] == "A" and m.get("C") is not None and bx is not None:
+            q = (m["C"] - bx) * to_pa
         elif spec["q"] == "A-box" and m["A"] is not None and bx is not None:
             q = (m["A"] - bx) * to_pa
         res["q_Pa"] = q
@@ -258,7 +307,7 @@ def detect(rows, header, units, rev, window_s, trim_s, min_s, k, a_pipe_mm2):
                 res[h] = mean(num(r.get(h)) for r in seg)
         results.append(res)
     skipped = [(a, b, x * to_pa if x is not None else None) for a, b, x in skipped]
-    return results, plateaus, (t, S, moving), skipped
+    return results, plateaus, (t, S, moving), skipped, notes
 
 
 def fmt(v, d=4):
@@ -294,15 +343,16 @@ def write_csv(results, rows, units, path):
             w.writerow([fmt(r.get(c), dec.get(c, 4)) for c in cols])
 
 
-def table_spec(rev, d, short=False):
+def table_spec(rev, d, results, short=False):
     """(heading, function(result) -> text) for the printed table and the plot's table."""
     pm = lambda m, s: "—" if m is None else "%s ± %s" % (fmt(m, d), fmt(s, d) if s is not None else "—")  # noqa: E731
     val = lambda key, dd: (lambda r: fmt(r.get(key), dd) or "—")  # noqa: E731
-    chans = [ch for ch in ("A", "B", "C", "D") if ch in REVS[rev]["cols"]]
+    chans = [ch for ch in ("A", "B", "C", "D") if ch in REVS[rev]["cols"]
+             and any(r[ch + "_mean"] is not None for r in results)]
     names = REVS[rev]["short" if short else "names"]
     spec = [(names[ch], (lambda ch: lambda r: pm(r[ch + "_mean"], r[ch + "_sd"]))(ch)) for ch in chans]
     spec.append(("Box (Pa)", val("box_mean_Pa", 1)))
-    if rev == "REV-C":
+    if rev == "REV-C" and any(r["closure_Pa"] is not None for r in results):
         spec.append(("C−(A+B) (Pa)", val("closure_Pa", 1)))
     if REVS[rev]["q"]:
         spec += [("q (Pa)", val("q_Pa", 1)), ("Q (CFM)", val("Q_cfm", 1)), ("CdA (mm²)", val("CdA_mm2", 0))]
@@ -313,7 +363,7 @@ def print_table(results, rows, units, rev):
     mano = has_mano(results)   # the mano column only appears when manometer readings were typed
     d = pdecimals(rows)
     dm = decimals(r.get(find_col(rows[0].keys(), "mano")) for r in rows) + 1
-    spec = table_spec(rev, d)
+    spec = table_spec(rev, d, results)
     heads = [h.split("  ", 1)[0] for h, _ in spec]           # short headings: "A", "B", "Box (Pa)" ...
     cells = [[f(r) for _, f in spec] for r in results]
     widths = [max(len(h), *(len(c[i]) for c in cells)) for i, h in enumerate(heads)]
@@ -350,7 +400,7 @@ def tint(color, alpha):
     return tuple(1 - alpha * (1 - c) for c in to_rgb(color))
 
 
-def plot(series, plateaus, results, rows, units, log_units, rev, path, title, trim_s, k):
+def plot(series, plateaus, results, rows, units, log_units, rev, path, title, trim_s, k, chan_notes):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -363,14 +413,15 @@ def plot(series, plateaus, results, rows, units, log_units, rev, path, title, tr
     d = pdecimals(rows)
     tspec = [("#", lambda r: "%d" % r["plateau"]), ("Section", section_name),
              ("Time (s)", lambda r: "%.1f – %.1f" % (r["t_start_s"], r["t_end_s"])),
-             ("Used", lambda r: "%.0f s" % r["seconds_used"])] + table_spec(rev, d, short=True)
+             ("Used", lambda r: "%.0f s" % r["seconds_used"])] + table_spec(rev, d, results, short=True)
 
-    # figure: header text, graph, results table (table grows with the number of sections)
+    # figure: header text, graph, results table (table grows with the number of sections), channel notes
     table_h = 0.42 * (len(results) + 1)
-    fig = plt.figure(figsize=(max(13, 1.45 * len(tspec)), 5.2 + table_h + 1.7))
+    notes_h = 0.25 * len(chan_notes)
+    fig = plt.figure(figsize=(max(13, 1.45 * len(tspec)), 5.2 + table_h + 1.7 + notes_h))
     gs = fig.add_gridspec(2, 1, height_ratios=[5.2, table_h], hspace=0.32,
                           left=0.065, right=0.935, top=1 - 1.4 / fig.get_figheight(),
-                          bottom=0.55 / fig.get_figheight())
+                          bottom=(0.55 + notes_h) / fig.get_figheight())
 
     # header
     when = ""
@@ -393,8 +444,9 @@ def plot(series, plateaus, results, rows, units, log_units, rev, path, title, tr
     ax = fig.add_subplot(gs[0])
     ax2 = ax.twinx() if spec["right"] else None
     for ch in spec["right"]:
-        ax2.plot(t, nan(S[ch]), color=COLORS[ch], lw=1, alpha=0.8 if ch == "C" else 1,
-                 label="%s  (right axis)" % spec["names"][ch])
+        if any(v is not None for v in S[ch]):
+            ax2.plot(t, nan(S[ch]), color=COLORS[ch], lw=1, alpha=0.8 if ch == "C" else 1,
+                     label="%s  (right axis)" % spec["names"][ch])
     for ch in spec["left"]:
         if S.get(ch) and any(v is not None for v in S[ch]):
             ax.plot(t, nan(S[ch]), color=COLORS[ch], lw=1.0 if ch == "D" else 1.6, ls="--" if ch == "D" else "-",
@@ -405,7 +457,8 @@ def plot(series, plateaus, results, rows, units, log_units, rev, path, title, tr
     for (lo, hi), r in zip(plateaus, results):
         on = r["state"] == "ON"
         ax.axvspan(t[lo], t[hi - 1], color=ON_COLOR if on else OFF_COLOR, alpha=0.16 if on else 0.18, lw=0)
-        ax.text((t[lo] + t[hi - 1]) / 2, 1.015, "#%d\n%s" % (r["plateau"], section_name(r) if on else "Zero"),
+        ax.text((t[lo] + t[hi - 1]) / 2, 1.015, "#%d\n%s" % (r["plateau"], " / ".join(r["area_labels"].split())
+                                                             if on else "Zero"),
                 transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=8.5,
                 fontweight="bold", color="#1e6b1e" if on else "#5f6368", linespacing=1.1)
     ax.set_xlim(t[0], t[-1])
@@ -465,6 +518,9 @@ def plot(series, plateaus, results, rows, units, log_units, rev, path, title, tr
     if spec["q"]:
         notes.append("Q and CdA use k = %.3g%s and A_pipe = %.0f mm²." % (k, " (uncalibrated)" if k == 1 else "", A_PIPE_MM2))
     fig.text(0.065, 0.2 / fig.get_figheight(), "  ".join(notes), fontsize=8.5, color="#52606d", va="bottom")
+    for i, s in enumerate(chan_notes):
+        fig.text(0.065, (0.2 + 0.25 * (len(chan_notes) - i)) / fig.get_figheight(), "Channel check: " + s,
+                 fontsize=9, fontweight="bold", color="#b45309", va="bottom")
     fig.savefig(path, dpi=130, facecolor="white")
     plt.close(fig)
     return True
@@ -485,10 +541,12 @@ def main():
     path = args.csv or newest_log(project)
     rows, header, units, log_units = load(path)
     rev = detect_rev(header)
-    results, plateaus, series, skipped = detect(rows, header, units, rev, args.window, args.trim, args.min,
-                                                args.k, args.pipe_mm2)
+    results, plateaus, series, skipped, chan_notes = detect(rows, header, units, rev, args.window, args.trim,
+                                                            args.min, args.k, args.pipe_mm2)
     print("Run: %s  (DAQ %s, %d rows, %.0f s, units %s, logged in %s)  trim %.1f s, min %.1f s"
           % (os.path.basename(path), rev, len(rows), series[0][-1], units, log_units, args.trim, args.min))
+    for s in chan_notes:
+        print("CHANNEL CHECK: " + s)
     if not results:
         print("No steady plateaus found. Try --min smaller or --window smaller.")
         return
@@ -504,7 +562,7 @@ def main():
     write_csv(results, rows, units, base + "_trimmed.csv")
     print("\nSaved %s" % (base + "_trimmed.csv"))
     if plot(series, plateaus, results, rows, units, log_units, rev, base + "_trimmed.png", os.path.basename(path),
-            args.trim, args.k):
+            args.trim, args.k, chan_notes):
         print("Saved %s" % (base + "_trimmed.png"))
         if args.open and hasattr(os, "startfile"):
             os.startfile(base + "_trimmed.png")
